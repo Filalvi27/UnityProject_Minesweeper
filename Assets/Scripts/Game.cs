@@ -18,6 +18,9 @@ public class Game : MonoBehaviour
 
     private bool gameover;
 
+    private bool minesGenerated = false;
+
+
     // svegliamo la grid
     private void Awake()
     {
@@ -36,11 +39,11 @@ public class Game : MonoBehaviour
         state = new Cell[widht, height];
         // appena iniziamo il gioco assicuriamoci che la variabile game over sia false
         gameover = false;
+        minesGenerated = false;
 
-        //importante questo ordine di chiamate
         GenerateCells();
-        GenerateMines();
-        GenerateNumbers();
+
+
         // se notiamo e non mettiamo questo la camera sarà fuori dal centro se aumentiamo i parametri, cosi siamo sicuri sia centratata
         Camera.main.transform.position = new Vector3 (widht/2f, height/2f, -10f);
 
@@ -72,45 +75,68 @@ public class Game : MonoBehaviour
 
     //generating the mines
 
-    private void GenerateMines()
+    // Genera mine evitando una posizione (e le sue 8 vicine) — usata al primo click
+    private void GenerateMinesAvoiding(Vector2Int avoidPos)
     {
-        for (int i = 0; i < mineCount; i++)
+        HashSet<int> occupied = new HashSet<int>(); // store encoded positions already mines
+        // precompute forbidden positions (avoidPos and neighbors)
+        HashSet<int> forbidden = new HashSet<int>();
+        for (int dx = -1; dx <= 1; dx++)
         {
-
-            int x = Random.Range(0, widht);
-            int y = Random.Range(0, height);
-            //PRIMA DI ASSEGNARE LA MINA DOBBIAMO VERIFICARE CHE NON SIA GIA USCITA QUELLA POSIZIONE
-            // se la cella contiene gia una mina ne cerchiamo un altra
-
-            while (state[x, y].type == Cell.Type.Mine)
+            for (int dy = -1; dy <= 1; dy++)
             {
-                // ne cerco una nuova casuale
-                /*
-                x = Random.Range(0, widht);
-                y = Random.Range(0, height);
-                */
-
-                //passo alla prossima 
-
-                x++;
-
-                if (x >= widht)
+                int nx = avoidPos.x + dx;
+                int ny = avoidPos.y + dy;
+                if (IsValid(nx, ny))
                 {
-                    x = 0;
-                    y++;
-
-                    if (y >= height)
-                    {
-                        y = 0;
-                    }
+                    forbidden.Add(nx + ny * widht);
                 }
-
             }
-
-            // settiamo il type della cella a mina
-            state[x, y].type = Cell.Type.Mine;
         }
+
+        // place mines randomly but not in forbidden and no duplicates
+        int placed = 0;
+        int attempts = 0;
+        int maxAttempts = mineCount * 20 + widht * height; // safety break
+
+        System.Random rng = new System.Random();
+
+        while (placed < mineCount && attempts < maxAttempts)
+        {
+            attempts++;
+            int x = rng.Next(0, widht);
+            int y = rng.Next(0, height);
+            int code = x + y * widht;
+            if (forbidden.Contains(code) || occupied.Contains(code))
+                continue;
+
+            // place mine
+            state[x, y].type = Cell.Type.Mine;
+            occupied.Add(code);
+            placed++;
+        }
+
+        // In rare case we couldn't place enough (shouldn't happen), fill sequentially skipping forbidden
+        if (placed < mineCount)
+        {
+            for (int x = 0; x < widht && placed < mineCount; x++)
+            {
+                for (int y = 0; y < height && placed < mineCount; y++)
+                {
+                    int code = x + y * widht;
+                    if (forbidden.Contains(code) || occupied.Contains(code)) continue;
+                    state[x, y].type = Cell.Type.Mine;
+                    occupied.Add(code);
+                    placed++;
+                }
+            }
+        }
+
+        // dopo aver piazzato le mine, generiamo i numeri
+        GenerateNumbers();
+        minesGenerated = true;
     }
+
 
 
     //importante che i numeri siano generati dopo le mine
@@ -227,50 +253,48 @@ public class Game : MonoBehaviour
     }
 
 
-
     private void Reveal()
     {
-        // dobbiamo convertire la posizione del mouse in coordinate
         Vector3 worldPosition = Camera.main.ScreenToWorldPoint(Input.mousePosition);
-        // ora convertiamo world position in posizione della cella
         Vector3Int cellPosition = board.tilemap.WorldToCell(worldPosition);
 
-        // ci potrebbe essere il caso nel cui il click avviene fuori dal grid, quindi risulterebbe invalido
+        if (!IsValid(cellPosition.x, cellPosition.y)) return;
+
         Cell cell = GetCell(cellPosition.x, cellPosition.y);
 
         // se la cella è invalida o è gia stata rivelata o è flaggata non va
-        if(cell.type == Cell.Type.Invalid || cell.revealed || cell.flagged)
+        if (cell.type == Cell.Type.Invalid || cell.revealed || cell.flagged)
         {
             return;
         }
-        switch (cell.type)
+
+        // se prima click: genera mine evitando la cella cliccata e le sue vicine
+        if (!minesGenerated)
         {
-            case Cell.Type.Mine:
-                Explode(cell);
-                break;
-            case Cell.Type.Empty:
-                Flood(cell);
-                CheckWinConditions();
-                break;
-
-            default:
-
-                cell.revealed = true;
-                state[cell.position.x, cell.position.y] = cell;
-                CheckWinConditions(); // check se ha vinto
-                break;
-        }
-        // if we reveal a cell and it s an empty one we need to flood it.
-        // flood in questo caso significa: quando scopriamo una casella dove non è contenuto nulla, le caselle attorno vuote dovranno showarsi
-        if (cell.type == Cell.Type.Empty)
-        {
-
+            GenerateMinesAvoiding(new Vector2Int(cellPosition.x, cellPosition.y));
         }
 
+        // ricarico la cella (ora che le mine sono generare il suo tipo potrebbe essere cambiato)
+        cell = GetCell(cellPosition.x, cellPosition.y);
 
-        cell.revealed = true;
-        state[cellPosition.x, cellPosition.y] = cell;
+        if (cell.type == Cell.Type.Mine)
+        {
+            Explode(cell);
+            board.Draw(state);
+            return;
+        }
+        else if (cell.type == Cell.Type.Empty)
+        {
+            Flood(cell);
+        }
+        else // Number
+        {
+            cell.revealed = true;
+            state[cell.position.x, cell.position.y] = cell;
+        }
+
         board.Draw(state);
+        CheckWinConditions();
     }
 
 
@@ -298,11 +322,17 @@ public class Game : MonoBehaviour
         // usiamo questa logica finche non esauriamo tutte le celle vicine 
         if ( cell.type == Cell.Type.Empty)
         {
-            Flood(GetCell(cell.position.x - 1, cell.position.y));
-            Flood(GetCell(cell.position.x + 1, cell.position.y));
-
-            Flood(GetCell(cell.position.x, cell.position.y - 1));
-            Flood(GetCell(cell.position.x, cell.position.y + 1));
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    if (dx == 0 && dy == 0) continue;
+                    int nx = cell.position.x + dx;
+                    int ny = cell.position.y + dy;
+                    if (!IsValid(nx, ny)) continue;
+                    Flood(GetCell(nx, ny));
+                }
+            }
         }
 
     }
